@@ -835,16 +835,16 @@ const { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContain
 
         // ---------------------------------------------------- 
         function App() {
-            // Authentication States
+            // Authentication States - Permanent session (no auto-logout / no expiry)
             const [currentUser, setCurrentUser] = useState(() => {
                 try {
                     const saved = localStorage.getItem("ep_session");
                     if (saved) {
                         const parsed = JSON.parse(saved);
                         if (parsed && parsed.user) {
-                            return { ...parsed.user, loggedAt: parsed.loggedAt };
+                            return parsed.user;
                         }
-                        if (Date.now() - parsed.loggedAt < 7 * 60 * 60 * 1000) return parsed;
+                        if (parsed) return parsed;
                     }
                 } catch (e) { }
                 return null;
@@ -1819,8 +1819,6 @@ const { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContain
                 };
             }, [entryLocationFilter, entryPlantFilter, plants, multiplyFactors]);
 
-            const lastActiveTime = useRef(Date.now());
-
             // Toast timeout handler
             useEffect(() => {
                 if (toast) {
@@ -1850,36 +1848,6 @@ const { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContain
                 setSelectedEntryIds([]);
             }, [entrySearch, entryLocationFilter, entryPlantFilter]);
 
-            // Session auto-logout inactivity tracker (7 hours)
-            useEffect(() => {
-                if (!currentUser) return;
-                const updateSessionTimer = () => {
-                    lastActiveTime.current = Date.now();
-                    try {
-                        const saved = localStorage.getItem("ep_session");
-                        if (saved) {
-                            const parsed = JSON.parse(saved);
-                            parsed.loggedAt = Date.now();
-                            localStorage.setItem("ep_session", JSON.stringify(parsed));
-                        }
-                    } catch (e) { }
-                };
-
-                const events = ["mousemove", "mousedown", "keypress", "scroll", "touchstart"];
-                events.forEach(ev => window.addEventListener(ev, updateSessionTimer));
-
-                const checkInterval = setInterval(() => {
-                    if (Date.now() - lastActiveTime.current > 7 * 60 * 60 * 1000) {
-                        handleLogout("Session expired due to inactivity.");
-                    }
-                }, 15000);
-
-                return () => {
-                    events.forEach(ev => window.removeEventListener(ev, updateSessionTimer));
-                    clearInterval(checkInterval);
-                };
-            }, [currentUser]);
-
             // Load DB on login — reset filters to All Plants / All Locations
             useEffect(() => {
                 if (!currentUser) return;
@@ -1892,17 +1860,26 @@ const { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContain
                 setLoading(true);
                 setError(null);
                 try {
-                    // Load daily entries
-                    const { data: entries, error: entriesErr } = await supabase
-                        .from('daily_entries')
-                        .select('*')
-                        .order('date', { ascending: false })
-                        .limit(50000);
-                    if (entriesErr) throw entriesErr;
-                    const rows = (entries || []).map(hydrateEntryWithRemarks);
+                    // Load daily entries with pagination (overcoming PostgREST default 1000 row limit)
+                    let allEntries = [];
+                    let from = 0;
+                    const PAGE_SIZE = 1000;
+                    while (true) {
+                        const { data: chunk, error: chunkErr } = await supabase
+                            .from('daily_entries')
+                            .select('*')
+                            .order('date', { ascending: false })
+                            .range(from, from + PAGE_SIZE - 1);
+                        if (chunkErr) throw chunkErr;
+                        if (!chunk || chunk.length === 0) break;
+                        allEntries = allEntries.concat(chunk);
+                        if (chunk.length < PAGE_SIZE) break;
+                        from += PAGE_SIZE;
+                    }
+                    const rows = allEntries.map(hydrateEntryWithRemarks);
                     setDailyEntries(rows);
 
-                    // Default date window = full available data so KPI cards populate on login
+                    // Default date window: preserve current year YTD, adjust if data outside bounds
                     if (rows.length > 0) {
                         const dates = rows.map((e) => e.date).filter(Boolean).sort();
                         const minDate = dates[0];
@@ -1910,17 +1887,29 @@ const { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContain
                         const today = toISODate(new Date());
                         setFilters(prev => ({
                             ...prev,
-                            startDate: minDate < prev.startDate ? minDate : prev.startDate,
+                            startDate: (prev.startDate > maxDate) ? minDate : prev.startDate,
                             endDate: maxDate > today ? maxDate : (today > prev.endDate ? today : prev.endDate),
                         }));
                     }
 
-                    // Load configs safely with fallback
+                    // Load configs safely with fallback and pagination
                     const loadConfig = async (table, setter) => {
                         try {
-                            const { data, error } = await supabase.from(table).select('*');
-                            if (!error && data) {
-                                setter(data);
+                            let allData = [];
+                            let fromRow = 0;
+                            while (true) {
+                                const { data, error } = await supabase.from(table).select('*').range(fromRow, fromRow + PAGE_SIZE - 1);
+                                if (error) {
+                                    if (fromRow === 0) throw error;
+                                    break;
+                                }
+                                if (!data || data.length === 0) break;
+                                allData = allData.concat(data);
+                                if (data.length < PAGE_SIZE) break;
+                                fromRow += PAGE_SIZE;
+                            }
+                            if (allData.length > 0) {
+                                setter(allData);
                             }
                         } catch (err) {
                             console.info(`Table '${table}' will be initialized once created in Supabase.`);
@@ -5901,8 +5890,10 @@ const { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContain
                     map[e.date].lpg += Number(e.lpg_used) || 0;
                     map[e.date].production += Number(e.production_qty) || Number(e.production_set) || 0;
                     map[e.date].odu += Number(e.odu) || 0;
-                    map[e.date].idu += Number(e.idu) || 0;
-                    map[e.date].cost += (Number(e.electricity_cost) || 0) + (Number(e.diesel_cost) || 0) + (Number(e.lpg_cost) || 0);
+                    const dayTotalCost = Number(e.total_cost) > 0
+                        ? Number(e.total_cost)
+                        : ((Number(e.electricity_cost) || 0) + (Number(e.solar_cost) || 0) + (Number(e.diesel_cost) || 0) + (Number(e.lpg_cost) || 0));
+                    map[e.date].cost += dayTotalCost;
                     map[e.date].waste += (Number(e.waste_hazardous) || 0) + (Number(e.waste_non_hazardous) || 0);
 
                     map[e.date].png += pngVal;
@@ -6510,8 +6501,6 @@ const { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContain
                 (productionSummary || []).forEach((r) => {
                     const date = String(r.date || "").slice(0, 10);
                     if (!/^20\d{2}-\d{2}-\d{2}$/.test(date)) return;
-                    if (filters.startDate && date < filters.startDate) return;
-                    if (filters.endDate && date > filters.endDate) return;
                     const plant = String(r.plant || "").trim().toUpperCase();
                     if (names.size && !names.has(plant)) return;
                     const loc = String(r.location || "").trim().toUpperCase();
@@ -6521,11 +6510,11 @@ const { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContain
                     byDate[date].idu += Number(r.idu_total) || 0;
                 });
                 return byDate;
-            }, [productionSummary, allowedPlants, filters.plant, filters.location, filters.startDate, filters.endDate]);
+            }, [productionSummary, allowedPlants, filters.plant, filters.location]);
 
             const productionCostByDate = useMemo(() => {
                 const map = {};
-                filteredEntries.forEach((e) => {
+                allPlantEntries.forEach((e) => {
                     const date = String(e.date || "").slice(0, 10);
                     if (!date) return;
                     const parts = (Number(e.electricity_cost) || 0)
@@ -6540,7 +6529,7 @@ const { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContain
                     map[date] = (map[date] || 0) + total;
                 });
                 return map;
-            }, [filteredEntries]);
+            }, [allPlantEntries]);
 
             const productionDailyChart = useMemo(() => {
                 const pad = (n) => String(n).padStart(2, "0");
@@ -6587,7 +6576,8 @@ const { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContain
                     Object.keys(productionCostByDate).forEach((date) => {
                         if (date.startsWith(d.period)) cost += productionCostByDate[date];
                     });
-                    return { ...d, odu: hit ? odu : d.odu, idu: hit ? idu : d.idu, cost };
+                    const finalCost = cost > 0 ? cost : (Number(d.cost) || 0);
+                    return { ...d, odu: hit ? odu : d.odu, idu: hit ? idu : d.idu, cost: finalCost };
                 });
             }, [last5MonthsTrendsData, sheetProductionByDate, productionCostByDate]);
 
@@ -6606,7 +6596,8 @@ const { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContain
                     Object.keys(productionCostByDate).forEach((date) => {
                         if (getFinancialYearKey(date) === d.period) cost += productionCostByDate[date];
                     });
-                    return { ...d, odu: hit ? odu : d.odu, idu: hit ? idu : d.idu, cost };
+                    const finalCost = cost > 0 ? cost : (Number(d.cost) || 0);
+                    return { ...d, odu: hit ? odu : d.odu, idu: hit ? idu : d.idu, cost: finalCost };
                 });
             }, [last4YearsTrendsData, sheetProductionByDate, productionCostByDate]);
 
@@ -6684,7 +6675,7 @@ const { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContain
                         const solCost = Number(e.solar_cost) || 0;
                         const dsl = Number(e.diesel_used) || 0;
                         const dslCost = Number(e.diesel_cost) || 0;
-                        const totC = Number(e.total_cost) || (elCost + solCost + dslCost);
+                        const totC = Number(e.total_cost) || (elCost + solCost + dslCost + (Number(e.lpg_cost) || 0));
 
                         electricity += elUnits;
                         electricityCost += elCost;
@@ -7436,15 +7427,26 @@ const { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContain
                             style={{ position: 'relative' }}
                         >
                             <div className="flex flex-col items-center text-center mb-6">
-                                <div className="h-14 w-14 mb-2 flex items-center justify-center">
+                                <div className="relative h-14 w-14 mb-2 flex items-center justify-center">
                                     <img
                                         src={PG_LOGO_BASE_64}
                                         alt="PG Electroplast Ltd"
                                         className="max-h-full max-w-full object-contain"
                                     />
+                                    <span className="absolute -top-1 -right-1 flex h-3.5 w-3.5" title="Live Telemetry System">
+                                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                                        <span className="relative inline-flex rounded-full h-3.5 w-3.5 bg-emerald-500 border-2 border-white shadow-xs"></span>
+                                    </span>
                                 </div>
-                                <h1 className="text-xl font-black text-slate-900 tracking-tight flex items-center gap-1.5 justify-center">
+                                <h1 className="text-xl font-black text-slate-900 tracking-tight flex items-center gap-2 justify-center">
                                     <span className="text-sky-600">Utility</span><span>Sense</span>
+                                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-700 text-[9px] font-black uppercase tracking-wider select-none">
+                                        <span className="relative flex h-1.5 w-1.5">
+                                            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                                            <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-500"></span>
+                                        </span>
+                                        LIVE
+                                    </span>
                                 </h1>
                                 <p className="text-[10.5px] font-bold text-slate-400 mt-1 uppercase tracking-wider">
                                     Corporate Energy & Resource Governance Hub
@@ -7755,6 +7757,7 @@ const { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContain
                                                                   return [
                                                                       <div key="fy_el_tt" className="space-y-1">
                                                                           <div>⚡ Grid Electricity: <b>{fmtNum(p.electricity)} kWh</b></div>
+                                                                          {p.electricityCost > 0 && <div className="text-sky-600 dark:text-sky-400">⚡ Electricity Cost: <b>{fmtINR(p.electricityCost)}</b></div>}
                                                                           <div>💰 Total Utility Cost: <b>{fmtINR(p.cost)}</b></div>
                                                                           {p.solarGen > 0 && <div>☀️ Solar Gen: <b>{fmtNum(p.solarGen)} kWh</b></div>}
                                                                       </div>,
@@ -8744,15 +8747,19 @@ const { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContain
 
             return (
                 <>
-                <div className="min-h-screen flex flex-col bg-white">
+                <div className={`flex flex-col bg-white ${activeTab === "reconciliation" ? "h-screen overflow-hidden" : "min-h-screen"}`}>
                     {/* Header Panel */}
                     <div className="sticky top-0 z-30 bg-white border-b border-slate-100 shadow-sm shrink-0 no-print" style={{ height: '64px' }}>
                         <div className="h-full px-5 flex items-center justify-between gap-2.5">
-                            {/* 1. Left Group: Logo & Title */}
-                            <div className="flex items-center gap-3 shrink-0">
-                                {/* Stylized PG Electroplast Circular Logo */}
-                                <div className="flex items-center select-none shrink-0 pr-1">
+                            {/* 1. Left Group: Logo & Title with Live Blinking Indicator */}
+                            <div className="flex items-center gap-2.5 sm:gap-3 shrink-0">
+                                {/* Stylized PG Electroplast Circular Logo with Live Pulse Dot */}
+                                <div className="relative flex items-center select-none shrink-0 pr-1">
                                     <img src={PG_LOGO_BASE_64} className="h-11 w-auto object-contain" alt="PG Electroplast Logo" />
+                                    <span className="absolute -top-0.5 -right-0.5 flex h-3 w-3" title="Live Telemetry System">
+                                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                                        <span className="relative inline-flex rounded-full h-3 w-3 bg-emerald-500 border-2 border-white dark:border-slate-800 shadow-xs"></span>
+                                    </span>
                                 </div>
                                 
                                 {/* UTILITY SENSE Title Block with Logo Image (enlarged in available space) */}
@@ -8762,6 +8769,15 @@ const { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContain
                                         alt="UtilitySense"
                                         className="h-12 sm:h-13 w-auto max-h-[52px] object-contain select-none transition-all"
                                     />
+                                </div>
+
+                                {/* Live Blinking Logo / Badge */}
+                                <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-600 dark:text-emerald-400 select-none shadow-xs" title="Live Telemetry & Real-Time Monitoring Active">
+                                    <span className="relative flex h-2 w-2">
+                                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-80"></span>
+                                        <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                                    </span>
+                                    <span className="text-[10px] font-black tracking-widest uppercase">LIVE</span>
                                 </div>
                             </div>
 
@@ -8980,7 +8996,7 @@ const { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContain
 
 
                     {/* MAIN CONTENT DISPLAY */}
-                    <main className={`main-content${activeTab === "reports" ? " main-content--reports" : ""}`}>
+                    <main className={`main-content${activeTab === "reports" ? " main-content--reports" : ""}${activeTab === "reconciliation" ? " main-content--reconciliation" : ""}`}>
 
                         {/* UTILITY BILL RECONCILIATION MODULE */}
                         {activeTab === "reconciliation" && (
@@ -8989,6 +9005,8 @@ const { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContain
                                 dailyEntries={dailyEntries}
                                 currentUser={currentUser}
                                 tariffs={tariffs}
+                                supabase={supabase}
+                                onRefreshTariffs={loadAllDatabase}
                             />
                         )}
 
@@ -10437,9 +10455,11 @@ const { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContain
                         )}
 
                         {/* FOOTER */}
-                        <footer className="pt-8 pb-4 text-center text-[10px] text-slate-400 tracking-wider no-print border-t border-slate-100/50 mt-12 uppercase font-semibold">
-                            UTILITY SENSE v3.0 · Secured Apps Script Data Hub · Corporate Governance Panel
-                        </footer>
+                        {activeTab !== "reconciliation" && (
+                            <footer className="pt-8 pb-4 text-center text-[10px] text-slate-400 tracking-wider no-print border-t border-slate-100/50 mt-12 uppercase font-semibold">
+                                UTILITY SENSE v3.0 · Secured Apps Script Data Hub · Corporate Governance Panel
+                            </footer>
+                        )}
                     </main>
 
                     {/* ----------------------------------------------------
