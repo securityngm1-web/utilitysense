@@ -7436,26 +7436,15 @@ const { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContain
                             style={{ position: 'relative' }}
                         >
                             <div className="flex flex-col items-center text-center mb-6">
-                                <div className="relative h-14 w-14 mb-2 flex items-center justify-center">
+                                <div className="h-14 w-14 mb-2 flex items-center justify-center">
                                     <img
                                         src={PG_LOGO_BASE_64}
                                         alt="PG Electroplast Ltd"
                                         className="max-h-full max-w-full object-contain"
                                     />
-                                    <span className="absolute -top-1 -right-1 flex h-3.5 w-3.5" title="Live Telemetry System">
-                                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                                        <span className="relative inline-flex rounded-full h-3.5 w-3.5 bg-emerald-500 border-2 border-white shadow-xs"></span>
-                                    </span>
                                 </div>
-                                <h1 className="text-xl font-black text-slate-900 tracking-tight flex items-center gap-2 justify-center">
+                                <h1 className="text-xl font-black text-slate-900 tracking-tight flex items-center gap-1.5 justify-center">
                                     <span className="text-sky-600">Utility</span><span>Sense</span>
-                                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-700 text-[9px] font-black uppercase tracking-wider select-none">
-                                        <span className="relative flex h-1.5 w-1.5">
-                                            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                                            <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-500"></span>
-                                        </span>
-                                        LIVE
-                                    </span>
                                 </h1>
                                 <p className="text-[10.5px] font-bold text-slate-400 mt-1 uppercase tracking-wider">
                                     Corporate Energy & Resource Governance Hub
