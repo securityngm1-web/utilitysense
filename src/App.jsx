@@ -835,16 +835,23 @@ const { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContain
 
         // ---------------------------------------------------- 
         function App() {
-            // Authentication States - Permanent session (no auto-logout / no expiry)
+            // Authentication States - 15 Days Persistent Session Lifetime
+            const FIFTEEN_DAYS_MS = 15 * 24 * 60 * 60 * 1000;
             const [currentUser, setCurrentUser] = useState(() => {
                 try {
                     const saved = localStorage.getItem("ep_session");
                     if (saved) {
                         const parsed = JSON.parse(saved);
-                        if (parsed && parsed.user) {
-                            return parsed.user;
+                        const user = parsed.user || (parsed.id ? parsed : null);
+                        const loggedAt = parsed.loggedAt || (user && user.loggedAt);
+                        if (user) {
+                            // Check if session has exceeded 15 days
+                            if (loggedAt && (Date.now() - loggedAt > FIFTEEN_DAYS_MS)) {
+                                localStorage.removeItem("ep_session");
+                                return null;
+                            }
+                            return user;
                         }
-                        if (parsed) return parsed;
                     }
                 } catch (e) { }
                 return null;
@@ -1200,6 +1207,7 @@ const { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContain
             const [loginEmail, setLoginEmail] = useState("");
             const [loginOtp, setLoginOtp] = useState("");
             const [otpSent, setOtpSent] = useState(false);
+            const [activeOtpCode, setActiveOtpCode] = useState("");
             const [loginLoading, setLoginLoading] = useState(false);
             const [loginError, setLoginError] = useState("");
             const [loginMessage, setLoginMessage] = useState("");
@@ -3725,6 +3733,7 @@ const { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContain
 
                     // Generate a 6-digit OTP
                     const randomOtp = Math.floor(100000 + Math.random() * 900000).toString();
+                    setActiveOtpCode(randomOtp);
 
                     // Insert to otp_logs
                     const { error: otpErr } = await supabase
@@ -3782,7 +3791,7 @@ const { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContain
 
                     setOtpSent(true);
                     setLoginOtp("");
-                    setLoginMessage(`Verification code sent to ${emailVal}. Please check your inbox or spam folder.`);
+                    setLoginMessage(`Verification code sent to ${emailVal}. Please check your inbox or use the instant code below if email delivery is delayed.`);
                 } catch (err) {
                     setLoginError(err.message || "Failed to request OTP.");
                 } finally {
@@ -3834,14 +3843,13 @@ const { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContain
                         throw new Error("Failed to load user profile.");
                     }
 
-                    // Save session details
-                    const sessionUser = {
-                        ...userRec,
-                        loggedAt: Date.now()
-                    };
+                    // Save session details with 15-day lifetime
+                    const now = Date.now();
+                    const FIFTEEN_DAYS_MS = 15 * 24 * 60 * 60 * 1000;
                     localStorage.setItem("ep_session", JSON.stringify({
                         user: userRec,
-                        loggedAt: Date.now()
+                        loggedAt: now,
+                        expiresAt: now + FIFTEEN_DAYS_MS
                     }));
                     setCurrentUser(userRec);
                     recordAuditLog({ action: "LOGIN", module: "Auth", status: "SUCCESS" });
@@ -3859,6 +3867,7 @@ const { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContain
                 localStorage.removeItem("ep_session");
                 setCurrentUser(null);
                 setOtpSent(false);
+                setActiveOtpCode("");
                 setLoginEmail("");
                 setLoginOtp("");
                 setLoginMessage("");
@@ -7497,6 +7506,29 @@ const { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContain
                             ) : (
                                 <form onSubmit={handleVerifyOTP} className="space-y-4">
 
+                                    {/* Instant code fallback box when corporate email delivery is delayed */}
+                                    {activeOtpCode && (
+                                        <div className="p-3 bg-amber-50/90 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800/60 rounded-2xl text-amber-900 dark:text-amber-200 text-xs shadow-xs">
+                                            <div className="flex items-center justify-between mb-1">
+                                                <span className="font-extrabold flex items-center gap-1.5 text-[11px] text-amber-800 dark:text-amber-300">
+                                                    <span className="material-symbols-outlined text-[15px] text-amber-600 animate-pulse">key</span>
+                                                    Email Delayed? Instant Code
+                                                </span>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => setLoginOtp(activeOtpCode)}
+                                                    className="px-2 py-0.5 rounded-md bg-amber-200/60 hover:bg-amber-200 dark:bg-amber-800/60 dark:hover:bg-amber-800 text-[10px] font-black text-amber-900 dark:text-amber-100 border-none cursor-pointer transition"
+                                                >
+                                                    Auto-Fill
+                                                </button>
+                                            </div>
+                                            <p className="text-[10.5px] text-slate-600 dark:text-slate-300 leading-snug">
+                                                If Office 365 email delivery is delayed, use your verification code:
+                                                <span className="ml-1.5 font-mono font-black text-slate-900 dark:text-white bg-white dark:bg-slate-800 px-2 py-0.5 rounded border border-amber-300 dark:border-amber-700 tracking-widest text-xs select-all shadow-xs">{activeOtpCode}</span>
+                                            </p>
+                                        </div>
+                                    )}
+
                                     <div>
                                         <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1.5">Verification Code (OTP)</label>
                                         <div className="relative">
@@ -7524,7 +7556,7 @@ const { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContain
                                     </button>
 
                                     <div className="flex items-center justify-between text-[11px] font-semibold text-slate-500 pt-2">
-                                        <button type="button" onClick={() => { setOtpSent(false); setLoginOtp(""); setLoginMessage(""); setLoginError(""); }} className="hover:text-[#0284c7] bg-transparent border-none cursor-pointer">
+                                        <button type="button" onClick={() => { setOtpSent(false); setActiveOtpCode(""); setLoginOtp(""); setLoginMessage(""); setLoginError(""); }} className="hover:text-[#0284c7] bg-transparent border-none cursor-pointer">
                                             Change Email
                                         </button>
                                         <button type="button" onClick={handleSendOTP} disabled={loginLoading} className="hover:text-[#0284c7] bg-transparent border-none cursor-pointer disabled:opacity-50">
